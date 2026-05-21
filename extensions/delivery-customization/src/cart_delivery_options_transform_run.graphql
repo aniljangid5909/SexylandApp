@@ -1,0 +1,51 @@
+query RunInput {
+  localization {
+    market {
+      handle
+      deliveryAvailableTime: metafield(
+        namespace: "shipping-2hr"
+        key: "deliveryAvailableTime"
+      ) {
+        value
+      }
+      deliveryUnavailableDays: metafield(
+        namespace: "shipping-2hr"
+        key: "deliveryUnavailableDays"
+      ) {
+        value
+      }
+      allowedZipcodes: metafield(
+        namespace: "shipping-2hr"
+        key: "zipcodes"
+      ) {
+        value
+      }
+    }
+  }
+  cart {
+    # Epoch ms timestamp captured by your pickup-2hr UI extension
+    orderTimestamp: attribute(key: "Order-Timestamp") {
+      value
+    }
+    deliveryGroups {
+      deliveryOptions {
+        handle
+        title
+        code
+      }
+      deliveryAddress {
+        zip
+      }
+    }
+    lines {
+      merchandise {
+        ... on ProductVariant {
+          product {
+            handle
+            hasAnyTag(tags: ["2hr Delivery", "Quickie"])
+          }
+        }
+      }
+    }
+  }
+}

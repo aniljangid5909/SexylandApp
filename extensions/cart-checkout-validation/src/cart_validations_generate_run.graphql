@@ -1,0 +1,13 @@
+query CartValidationsGenerateRunInput {
+  cart {
+    # Alias use karenge taaki JS me cart.pickupStore se access ho
+    pickupStore: attribute(key: "Pickup-Store") {
+      value
+    }
+    deliveryGroups {
+      selectedDeliveryOption {
+        title
+      }
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "shipingfunctionextention",
+  "version": "1.0.0",
+  "license": "UNLICENSED",
+  "scripts": {
+    "shopify": "shopify",
+    "build": "shopify app build",
+    "dev": "shopify app dev",
+    "info": "shopify app info",
+    "generate": "shopify app generate",
+    "deploy": "shopify app deploy"
+  },
+  "dependencies": {
+    "@shopify/ui-extensions": "2025.10.x",
+    "preact": "^10.23.1"
+  },
+  "trustedDependencies": [
+    "@shopify/plugin-cloudflare"
+  ],
+  "author": "Dell",
+  "private": true,
+  "workspaces": [
+    "extensions/*"
+  ]
+}
