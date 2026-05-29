@@ -14,13 +14,6 @@ const NO_CHANGES = {
 /**
  * Entry point for cart.delivery-options.transform.run
  *
- * Logic:
- * - Sirf un carts ke liye 2hr Delivery allow jahan:
- *   - kam se kam ek product me "2hr Delivery" ya "Quickie" tag ho
- *   - delivery zip allowed zip group me ho
- *   - current order time (Order-Timestamp) allowed time window me ho
- *   - order kisi unavailable window (deliveryUnavailableDays) ke andar na ho
- *
  * @param {RunInput} input
  * @returns {CartDeliveryOptionsTransformRunResult}
  */
@@ -28,172 +21,136 @@ export function cartDeliveryOptionsTransformRun(input) {
   /** @type {Operation[]} */
   const operations = [];
 
-  const market = input.localization?.market;
-  const cart = input.cart;
+  // --- Parse group data exactly like old code ------------------------------
 
-  // --- Parse market metafields into grouped configs ------------------------
-
-  const allowedZipcodesRaw = market?.allowedZipcodes?.value ?? "";
-  const deliveryAvailableTimeRaw = market?.deliveryAvailableTime?.value ?? "";
-  const deliveryUnavailableDaysRaw =
-    market?.deliveryUnavailableDays?.value ?? "";
-
-  // allowedZipcodes: "10001|10002@@20001|20002"
-  const allowedZipcodesGroups = allowedZipcodesRaw
+  const allowedZipcodesGroups = (
+    input.localization.market.allowedZipcodes?.value || ""
+  )
     .split("@@")
     .map((group) => group.split("|").filter(Boolean));
 
-  // deliveryAvailableTime:
-  //   - "MON:09:00/17:00|TUE:10:00/18:00|..." (per day) OR
-  //   - "08:00:00/23:00:00" (same window every day)
-  const deliveryAvailableTimeGroups = deliveryAvailableTimeRaw
+  const deliveryAvailableTimeGroups = (
+    input.localization.market.deliveryAvailableTime?.value || ""
+  )
     .split("@@")
     .map((group) => group || "");
 
-  // deliveryUnavailableDays:
-  //   - Each group: "2025-07-01T00:00/2025-07-02T00:00|2025-12-24T00:00/..."
-  const deliveryUnavailableDaysGroups = deliveryUnavailableDaysRaw
+  const deliveryUnavailableDaysGroups = (
+    input.localization.market.deliveryUnavailableDays?.value || ""
+  )
     .split("@@")
     .map((group) => {
       if (!group) return [];
       return group.split("|").filter(Boolean);
     });
 
-  // --- Basic cart info -----------------------------------------------------
+  const cartLines = input?.cart?.lines || [];
+  const has2hrDeliveryTag = cartLines.some(
+    (line) => line?.merchandise?.product?.hasAnyTag === true,
+  );
 
-  const cartLines = cart?.lines ?? [];
-  const deliveryGroup = cart?.deliveryGroups?.[0];
-  const deliveryOptions = deliveryGroup?.deliveryOptions ?? [];
-  const deliveryZip = deliveryGroup?.deliveryAddress?.zip ?? "";
+  const deliveryGroup = input?.cart?.deliveryGroups?.[0];
+  const deliveryOptions = deliveryGroup?.deliveryOptions || [];
+  const deliveryZip = deliveryGroup?.deliveryAddress?.zip || "";
 
-  const has2hrDeliveryTag = cartLines.some((line) => {
-    const product = line?.merchandise?.product;
-    return product?.hasAnyTag === true;
-  });
-
-  // --- Helper to hide the "2hr Delivery" option ---------------------------
+  // --- Helper: hide "2hr Delivery" option (operation shape updated) -------
 
   /**
    * Hide any delivery option whose title is exactly "2hr Delivery".
    *
-   * @returns {CartDeliveryOptionsTransformRunResult}
+   * @returns {CartDeliveryOptionsTransformRunResult | undefined}
    */
   function hide2hrDeliveryOption() {
     if (!Array.isArray(deliveryOptions) || deliveryOptions.length === 0) {
-      return NO_CHANGES;
+      return;
     }
 
-    for (const deliveryOption of deliveryOptions) {
-      if (deliveryOption.title === "2hr Delivery") {
+    deliveryOptions.forEach((deliveryOption) => {
+      const { title, handle } = deliveryOption;
+      if (title === "2hr Delivery") {
         operations.push({
           deliveryOptionHide: {
-            deliveryOptionHandle: deliveryOption.handle,
+            deliveryOptionHandle: handle,
           },
         });
       }
-    }
+    });
 
-    if (operations.length === 0) {
-      return NO_CHANGES;
+    if (operations.length > 0) {
+      return { operations };
     }
-
-    return { operations };
   }
 
-  // If we don't have options or a zip code, there's no way to validate;
-  // just hide the 2hr option if it exists.
+  // Agar options ya zip missing hai, to simple hide
   if (!deliveryOptions.length || !deliveryZip) {
-    return hide2hrDeliveryOption();
+    return hide2hrDeliveryOption() || NO_CHANGES;
   }
 
-  // --- Time utilities (UTC‑safe) ------------------------------------------
+  // --- Time calculations (old behaviour) -----------------------------------
 
-  const orderTimestamp = Number(cart?.orderTimestamp?.value);
+  const orderTimestamp = Number(input?.cart?.orderTimestamp?.value);
   const orderTime = new Date(orderTimestamp);
 
   /**
-   * Convert a time or ISO string to a UTC timestamp (ms since epoch).
-   *
-   * - If it contains "T": treat as full ISO datetime and parse directly.
-   * - If it contains ":" but no date: combine with the order date (UTC year/month/day).
-   *
-   * @param {string} timeOrDateStr
-   * @param {Date} [orderDate]
-   * @returns {number}
+   * Old convertToTimestamp logic:
+   * - "2026-04-25T07:00:00" → Date.parse as-is
+   * - "09:00:00"            → orderTime.toDateString() + " 09:00:00"
    */
-  const convertToTimestamp = (timeOrDateStr, orderDate) => {
+  const convertToTimestamp = (timeOrDateStr, orderTimeParam) => {
     if (!timeOrDateStr) return 0;
 
-    // Full ISO datetime string (e.g., "2025-07-01T09:00:00Z")
+    // Full ISO datetime string
     if (timeOrDateStr.includes("T")) {
       return Date.parse(timeOrDateStr);
     }
 
-    // Time only: "HH:MM" or "HH:MM:SS"
-    if (timeOrDateStr.includes(":") && orderDate) {
-      const year = orderDate.getUTCFullYear();
-      const month = orderDate.getUTCMonth(); // 0–11
-      const day = orderDate.getUTCDate(); // 1–31
-
-      const parts = timeOrDateStr.split(":").map((p) => parseInt(p, 10));
-      const hours = parts[0] || 0;
-      const minutes = parts[1] || 0;
-      const seconds = parts[2] || 0;
-
-      // Build timestamp in UTC
-      return Date.UTC(year, month, day, hours, minutes, seconds);
+    // Time-only string, combine with order's local date
+    if (timeOrDateStr.includes(":") && orderTimeParam) {
+      const orderDateStr = orderTimeParam.toDateString();
+      const combinedDateTimeStr = `${orderDateStr} ${timeOrDateStr}`;
+      return Date.parse(combinedDateTimeStr);
     }
 
-    throw new Error("Invalid input format for delivery time.");
+    throw new Error("Invalid input format.");
   };
 
   /**
-   * Parse delivery schedule string into a per‑day schedule.
-   *
+   * Old parseDeliverySchedule logic, unchanged
    * Supports:
-   * - New format:
-   *   "MON:09:00/17:00|TUE:10:00/18:00|...|SUN:closed"
-   * - Legacy:
-   *   "09:00/17:00" or "08:00:00/23:00:00" (same time every day)
-   *   "closed" (closed all days)
-   *
-   * @param {string} scheduleStr
-   * @returns {Record<string, {start: string; end: string} | null>}
+   * - "MON:09:00:00/17:00:00|TUE:10:00:00/18:00:00|...|SUN:closed"
+   * - "09:00:00/20:00:00"
+   * - "closed"
    */
   const parseDeliverySchedule = (scheduleStr) => {
     if (!scheduleStr) return {};
 
-    // New per‑day format with day prefixes
-    if (/(MON|TUE|WED|THU|FRI|SAT|SUN):/i.test(scheduleStr)) {
-      /** @type {Record<string, {start: string; end: string} | null>} */
+    // New day-specific format
+    if (/(MON|TUE|WED|THU|FRI|SAT|SUN):/.test(scheduleStr)) {
       const schedule = {};
       const dayEntries = scheduleStr.split("|");
 
-      for (const entry of dayEntries) {
+      dayEntries.forEach((entry) => {
         const colonIndex = entry.indexOf(":");
-        if (colonIndex === -1) continue;
+        if (colonIndex === -1) return;
 
         const day = entry.substring(0, colonIndex).toUpperCase();
-        const timeRange = entry.substring(colonIndex + 1).trim();
-        if (!timeRange) continue;
+        const timeRange = entry.substring(colonIndex + 1);
 
         if (timeRange.toLowerCase() === "closed") {
           schedule[day] = null;
         } else if (timeRange.includes("/")) {
           const [start, end] = timeRange.split("/");
-          schedule[day] = {
-            start: start.trim(),
-            end: end.trim(),
-          };
+          schedule[day] = { start: start.trim(), end: end.trim() };
         }
-      }
+      });
 
       return schedule;
     }
 
-    // Legacy "closed": closed all days
-    const trimmed = scheduleStr.trim().toLowerCase();
-    if (trimmed === "closed") {
+    // Legacy format
+    const trimmedSchedule = scheduleStr.trim().toLowerCase();
+
+    if (trimmedSchedule === "closed") {
       return {
         MON: null,
         TUE: null,
@@ -205,18 +162,17 @@ export function cartDeliveryOptionsTransformRun(input) {
       };
     }
 
-    // Legacy time‑range: "HH:MM/HH:MM" or "HH:MM:SS/HH:MM:SS"
     if (scheduleStr.includes("/")) {
       const [start, end] = scheduleStr.split("/");
-      const range = { start: start.trim(), end: end.trim() };
+      const timeRange = { start: start.trim(), end: end.trim() };
       return {
-        MON: range,
-        TUE: range,
-        WED: range,
-        THU: range,
-        FRI: range,
-        SAT: range,
-        SUN: range,
+        MON: timeRange,
+        TUE: timeRange,
+        WED: timeRange,
+        THU: timeRange,
+        FRI: timeRange,
+        SAT: timeRange,
+        SUN: timeRange,
       };
     }
 
@@ -224,55 +180,59 @@ export function cartDeliveryOptionsTransformRun(input) {
   };
 
   /**
-   * Check if orderTime is inside today's allowed window.
-   * Day chosen using UTC weekday (to match UTC timestamps).
-   *
-   * @param {Record<string, {start: string; end: string} | null>} schedule
-   * @param {Date} currentTime
-   * @returns {boolean}
+   * Old checkDaySpecificAvailability logic:
+   * - Uses local getDay() (0 = Sunday ... 6 = Saturday)
+   * - Compares orderTime.getTime() inside start/end
    */
-  const checkDaySpecificAvailability = (schedule, currentTime) => {
+  const checkDaySpecificAvailability = (schedule, orderTimeParam) => {
     const dayNames = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
-    const currentDay = dayNames[currentTime.getUTCDay()];
-    const daySchedule = schedule[currentDay];
+    const currentDay = dayNames[orderTimeParam.getDay()];
 
-    if (!daySchedule) return false;
+    const daySchedule = schedule[currentDay];
+    if (!daySchedule) return false; // Closed that day
 
     try {
-      const startTs = convertToTimestamp(daySchedule.start, currentTime);
-      const endTs = convertToTimestamp(daySchedule.end, currentTime);
-      const nowTs = currentTime.getTime(); // epoch ms (UTC)
+      const deliveryStartTimestamp = convertToTimestamp(
+        daySchedule.start,
+        orderTimeParam,
+      );
+      const deliveryEndTimestamp = convertToTimestamp(
+        daySchedule.end,
+        orderTimeParam,
+      );
+      const nowTs = orderTimeParam.getTime();
 
-      return startTs < nowTs && nowTs < endTs;
+      return deliveryStartTimestamp < nowTs && nowTs < deliveryEndTimestamp;
     } catch {
       return false;
     }
   };
 
   /**
-   * Check if orderTimestamp falls inside any unavailable date/time range.
-   *
-   * @param {string[]} unavailableDays
-   * @param {number} orderTs
-   * @returns {boolean}
+   * Old checkDeliveryUnavailableDays logic:
+   * - unavailableDay: "2026-04-25T07:00/2026-04-25T23:01"
+   * - convertToTimestamp called without orderTime for these → ISO parse
    */
-  const checkDeliveryUnavailableDays = (unavailableDays, orderTs) => {
-    return unavailableDays.some((entry) => {
-      const [from, to] = entry.split("/");
-      const fromTs = convertToTimestamp(from, orderTime);
-      const toTs = convertToTimestamp(to, orderTime);
-      return fromTs < orderTs && orderTs < toTs;
+  const checkDeliveryUnavailableDays = (unavailableDays, orderTimestampParam) => {
+    return unavailableDays.some((unavailableDay) => {
+      const [unavailableFrom, unavailableTo] = unavailableDay.split("/");
+      const unavailableFromTimestamp = convertToTimestamp(unavailableFrom);
+      const unavailableToTimestamp = convertToTimestamp(unavailableTo);
+      return (
+        unavailableFromTimestamp < orderTimestampParam &&
+        orderTimestampParam < unavailableToTimestamp
+      );
     });
   };
 
-  // --- Business logic ------------------------------------------------------
+  // --- Business rules (same as old) ---------------------------------------
 
-  // 1. If no products have the 2hr delivery tag, hide the 2hr option.
+  // 1. If no product has 2hr tag, hide option
   if (!has2hrDeliveryTag) {
-    return hide2hrDeliveryOption();
+    return hide2hrDeliveryOption() || NO_CHANGES;
   }
 
-  // 2. Find which metafield group the zip code belongs to (if any).
+  // 2. Find which group the zip code belongs to
   let zipGroupIndex = -1;
   for (let i = 0; i < allowedZipcodesGroups.length; i++) {
     if (allowedZipcodesGroups[i].includes(deliveryZip)) {
@@ -281,33 +241,33 @@ export function cartDeliveryOptionsTransformRun(input) {
     }
   }
 
-  // 3. If zip code doesn't match any group, hide 2hr delivery.
+  // 3. If zip code doesn't match any group, hide 2hr
   if (zipGroupIndex === -1) {
-    return hide2hrDeliveryOption();
+    return hide2hrDeliveryOption() || NO_CHANGES;
   }
 
-  // 4. Read schedule/unavailable ranges for the matching group.
+  // 4. Load constraints for that group
   const deliveryAvailableTimeStr =
     deliveryAvailableTimeGroups[zipGroupIndex] || "";
   const deliveryUnavailableDays =
     deliveryUnavailableDaysGroups[zipGroupIndex] || [];
 
   const deliverySchedule = parseDeliverySchedule(deliveryAvailableTimeStr);
-
   const deliveryAvailable = checkDaySpecificAvailability(
     deliverySchedule,
-    orderTime
+    orderTime,
   );
 
   const deliveryUnavailableDay =
-    deliveryUnavailableDays.length > 0 &&
+    deliveryUnavailableDays.length !== 0 &&
     checkDeliveryUnavailableDays(deliveryUnavailableDays, orderTimestamp);
 
-  // 5. If any constraint fails, hide the 2hr delivery option.
+  // 5. If time window not valid OR falls in unavailable days, hide 2hr
   if (!deliveryAvailable || deliveryUnavailableDay) {
-    return hide2hrDeliveryOption();
+    const result = hide2hrDeliveryOption();
+    if (result) return result;
   }
 
-  // 6. Otherwise, leave options unchanged.
+  // 6. Else, leave options unchanged
   return NO_CHANGES;
 }

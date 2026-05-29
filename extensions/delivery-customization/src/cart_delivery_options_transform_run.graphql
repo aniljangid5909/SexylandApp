@@ -3,19 +3,19 @@ query RunInput {
     market {
       handle
       deliveryAvailableTime: metafield(
-        namespace: "shipping-2hr"
+        namespace: "shipping2hr"
         key: "deliveryAvailableTime"
       ) {
         value
       }
       deliveryUnavailableDays: metafield(
-        namespace: "shipping-2hr"
+        namespace: "shipping2hr"
         key: "deliveryUnavailableDays"
       ) {
         value
       }
       allowedZipcodes: metafield(
-        namespace: "shipping-2hr"
+        namespace: "shipping2hr"
         key: "zipcodes"
       ) {
         value
